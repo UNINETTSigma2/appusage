@@ -1,0 +1,19 @@
+[Jobs]
+pbs = 1
+
+[Log]
+ignoredUsers    = root, postfix, ntp, messagebus, haldaemon, arraysvcs, nagios, nobody, sshd
+IgnoredPrograms = mpirun, mpid
+allowedUsers    = techila
+checkCategory   = OTHER
+hyperThreading  = 1
+
+[Appusage]
+startDate    = 180401
+endDate      = 180930
+machine      = vilje
+nodesRegex   = r*[0-9]
+admGroup     = nits
+slurm        = 0
+goldPath     = /sw/ntnu/software/gold/bin
+coresPerNode = 16

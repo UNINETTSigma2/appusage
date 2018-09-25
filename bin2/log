@@ -1,0 +1,306 @@
+#!/usr/bin/env python
+
+# This program stores the information about the running processes on an AIX
+# compute node in a file.
+
+from subprocess import Popen, PIPE
+from fnmatch import fnmatch
+import sys
+import os
+import time
+import multiprocessing
+import ConfigParser
+
+# Ignored users/programs do not show up on reports. Allowed users
+# do show up, but are not required to have a connected job.
+
+# Global variables (do not edit)
+hostName        = ""
+rootDir         = ""
+ignoredUsers    = []
+ignoredPrograms = []
+allowedUsers    = []
+checkCategory   = []
+coresPerNode    = 0
+
+
+# ******************************************************************************
+
+def init():
+  global hostName, rootDir, ignoredUsers, ignoredPrograms, allowedUsers, checkCategory, coresPerNode
+
+  # Get the current host name
+  p1 = Popen(['hostname'], stdout=PIPE)
+  hostName = p1.communicate()[0].strip().split('.')[0]
+
+  # Get the root directory, where this script is located
+  relPath = os.path.dirname(sys.argv[0])
+  absPath = os.path.abspath(relPath)
+
+  # Remove the ending '/'
+  if absPath.endswith('/'):
+    absPath = absPath.rstrip('/')
+
+  # Remove the bin directory
+  if absPath.endswith('bin2'):
+    absPath = os.path.dirname(absPath)
+
+  # Make certain that the path ends with a '/'
+  if not absPath.endswith('/'):
+    absPath += '/'
+
+  rootDir = absPath
+
+  # Read info from config file
+  config = ConfigParser.ConfigParser()
+  config.read(rootDir+'etc/config')
+  list = config.get('Log', 'ignoredUsers').strip().split(',')
+  for item in list:
+    ignoredUsers.append(item.strip())
+  list = config.get('Log', 'ignoredPrograms').strip().split(',')
+  for item in list:
+    ignoredPrograms.append(item.strip())
+  list = config.get('Log', 'allowedUsers').strip().split(',')
+  for item in list:
+    allowedUsers.append(item.strip())
+  list = config.get('Log', 'checkCategory').strip().split(',')
+  for item in list:
+    checkCategory.append(item.strip())
+  hyperThreading = config.get('Log', 'hyperThreading').strip()
+
+  # Set the number of cores per node
+  coresPerNode = multiprocessing.cpu_count()
+  if hyperThreading == '1':
+    coresPerNode = coresPerNode / 2
+
+
+# ******************************************************************************
+
+# Read a list of mappings from executable name to application name from the
+# configuration file
+def getAppMappings(cfgFile):
+  map = []
+
+  if os.path.exists(cfgFile):
+    for line in open(cfgFile):
+      # Remove the ending newline character
+      line = line.rstrip('\n')
+
+      # Split the line into tab separated words
+      words = line.split('\t')
+      if len(words) < 2: # Skip empy lines
+        continue
+      
+      # Multiple tabs separate the pattern and the appname, so store 
+      # the first and the last word in a tuple
+      mapping = (words[0].strip(), words[len(words)-1].strip())
+
+      map.append(mapping)
+
+  return map
+
+# ******************************************************************************
+
+# Reads a list of jobs running on this node from a file
+# This list should have been made by the jobs.py script
+def getJobList(filename, hostname):
+  # Each line is in the format:
+  # hostname:jobid1,userid1;jobid2,userid2;...
+
+  # Check if the file with the job lists exists
+  if os.path.exists(filename):
+    # Check for file corruption
+    p1 = Popen(['file', '-b', filename],stdout=PIPE)
+    output = p1.communicate()[0].strip()
+
+    if not "ASCII text" in output:
+      # Write a warning about the corrupted file
+      iFileName = rootDir+"log/"+hostname+".illegal"
+      file = open(iFileName, "w")
+      file.write(hostname+": Unable to read "+filename+"\n")
+      file.close()
+      sys.exit()
+
+    # Search for hostname in the file
+    for line in open(filename):
+      node, joblist = line.rstrip('\n').split(':')
+      if node == hostname:
+        jobs = []
+        for job in joblist.split(';'):
+          jobid, userid, nodeCount, account = job.split(',')
+          jobs.append([jobid,userid,nodeCount,account])
+
+        return jobs
+
+  return []
+
+# ******************************************************************************
+
+# Get the job id and the number of nodes that the user is running on.
+def getJobInfo(joblist, userid):
+  for job, user, nodeCount, account in joblist:
+    if user == userid:
+      return (job, nodeCount, account)
+
+  return ("", "", "")
+
+# ******************************************************************************
+
+# Finds the name of the application to which the executable belongs
+def getAppName(path, mappings):
+  for pattern, app in mappings:
+    if fnmatch(path, pattern):
+      return app
+
+  return "OTHER"
+
+# ******************************************************************************
+
+# Get a list of information about the processes currently running on this
+# compute node
+def getProcessInfo(hostname, mappings, jobList):
+  pinfo   = dict()
+  illegal = []
+
+  # Get the list of running processes
+  p1 = Popen(['ps', 'H', '-e', '-opid=,user:20=,pcpu=,comm='],stdout=PIPE)
+  psLines = p1.communicate()[0].strip()
+
+  # Get the current time in seconds
+  now = str(time.time())
+
+  # Fill pinfo with information about all running processes
+  for line in psLines.split('\n'):
+    # Get the information about a single process
+    try:
+      pid,user,pcpu,cmd = line.strip().split()
+    except:
+      continue
+
+    # Skip OS processes
+    if user in ignoredUsers:
+      continue
+
+    # Skip empty commands (should never occur)
+    if len(cmd) == 0:
+      continue
+
+    # Read the process tree, but ignore processes that no longer exist
+    try:
+      path = os.readlink("/proc/"+pid+"/exe")
+    except:
+      continue
+    path = path.rstrip('\n').split(' ')[0] # remove ' (deleted)' from path
+
+    # Skip OS processes
+    exe = os.path.basename(path)
+    if exe in ignoredPrograms:
+      continue
+
+    # Store information about illegal processes and then skip it
+    jobid, nodeCount, account = getJobInfo(jobList, user)
+    if not nodeCount:
+      appName = getAppName(path, mappings)
+      x = [hostname, user, pid, appName, exe]
+      if not x in illegal:
+        illegal.append(x)
+      continue
+
+    # Skip the PBS processes
+    if pcpu == "0.0":
+      continue
+
+    efficiency = float(pcpu)
+
+    # Store the information in pinfo
+    if exe in pinfo:
+      pinfo[exe][2] += efficiency
+      pinfo[exe][3] += 1
+    else:
+      appName = getAppName(path, mappings)
+      pinfo[exe] = [now, user, efficiency, 1, appName, path, jobid, nodeCount, account]
+
+  return pinfo, illegal
+
+# ******************************************************************************
+
+# Store the latest information, while correcting previous errors
+def storeInfo(pinfo, illegal, fileName, mappings):
+  fileExists = os.path.exists(fileName)
+
+  # Read all the previous entries in the current log file
+  if fileExists:
+    logEntries = list();
+    for line in open(fileName):
+      fields = line.rstrip('\n').split(':')
+      # Add missing fields from previous versions of this script
+      while len(fields) < 9:
+        fields.append("")
+      # Only add lines that are not corrupted
+      if fields[0] != "" and fields[1] != "" and fields[2] != "" and fields[3] != "":
+        logEntries.append(fields)
+
+  # Rewrite all information to the log file
+  file = open(fileName, "w")
+
+  # Store all old entries in the log file, while reclassifying the OTHER entries
+  if fileExists:
+    for time,user,eff,app,path,jobid,nodeCount,coreCount,account in logEntries:
+      if app in checkCategory:
+        app = getAppName(path, mappings)
+      file.write("%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (time, user, eff, app, path, jobid, nodeCount, coreCount, account))
+
+  # Store all new entries in the log file
+  for exe in pinfo:
+    info = pinfo[exe]
+
+    # In the case where users use SMT and e.g. run with 32 processes on a node,
+    # then one must divide by the number of cores per node: 16
+    cores = info[3]
+    if cores > coresPerNode: cores = coresPerNode 
+
+    file.write("%s:%s:%s:%s:%s:%s:%s:%s:%s\n" % (info[0], info[1], info[2]/cores, info[4], info[5], info[6], info[7], cores, info[8]))
+  file.close()
+
+  # Store information about illegal processes on this node 
+  iFileName = fileName+".illegal"
+  if len(illegal) == 0:
+    # Delete the file hostname.illegal, if there are no illegal processes
+    if os.path.exists(iFileName):
+      os.remove(iFileName)
+  else:
+    lines = ""
+    for host, user, pid, appName, exe in illegal:
+      if not user in allowedUsers:
+        lines = lines + "%s: %s, %s, %s, %s\n" % (host, pid, user, appName, exe)
+    if lines == "":
+      # Delete the file hostname.illegal, if there are no illegal processes
+      if os.path.exists(iFileName):
+        os.remove(iFileName)
+    else:
+      file = open(fileName+".illegal", "w")
+      file.write(lines)
+      file.close()
+
+
+# ******************************************************************************
+
+
+# Main
+
+
+# Read global variables
+init()
+
+# Read the list of mappings from executable names to application names
+# from the configuration file.
+mappings = getAppMappings(rootDir + 'etc/categories')
+
+# Read the list of jobs that should be running on this node
+jobList = getJobList(rootDir+"log/joblist", hostName)
+
+# Get information about the processes currently running on this compute node
+pinfo, illegal = getProcessInfo(hostName, mappings, jobList)
+
+# Store the process information in a file 
+storeInfo(pinfo, illegal, rootDir + "log/" + hostName, mappings)

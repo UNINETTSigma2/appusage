@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Let no files expand to a null string
+shopt -s nullglob
+
+# Go to the Appusage directory
+cd /cluster/software/appusage/1.0
+
+# Sort .illegal files and store them in appusage_log1
+today=`date | cut -c5-10`
+rm -f crontab/appusage_log1/*
+for f in log/*.illegal
+do
+  # ignore compute nodes that are down
+  lsout=`ls -l $f | grep "$today"`
+
+  if [ "$lsout" != "" ]; then
+    name=`basename $f`
+    sort $f > crontab/appusage_log1/$name
+  fi
+done

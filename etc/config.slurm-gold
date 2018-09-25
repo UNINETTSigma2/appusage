@@ -1,0 +1,20 @@
+[Jobs]
+PBS = 0
+slurm = 1
+
+[Log]
+ignoredUsers    = root, postfix, ntp, messagebus, haldaemon, arraysvcs, nagios, nobody, sshd, rpc, dbus, rpcuser, gdm, munge, mysql
+IgnoredPrograms = mpirun, mpid, ssh-agent, tail, munged, sshd, smpd
+allowedUsers    = dj
+checkCategory   = OTHER
+hyperThreading  = 0
+
+[Appusage]
+startDate  = 180401
+endDate    = 180930
+gold       =1
+goldPath   = /global/apps/gold/2.1.5.0/bin
+machine    = stallo
+nodesRegex = c[0-9]*
+admGroup   = staff
+coresPerNode   = 32

@@ -1,0 +1,4 @@
+10  08  *  *  *  /cluster/software/appusage/1.0/crontab/checkIllegal1
+20  08  *  *  *  /cluster/software/appusage/1.0/crontab/checkIllegal2
+40  13  *  *  *  /cluster/software/appusage/1.0/crontab/checkIllegal1
+50  13  *  *  *  /cluster/software/appusage/1.0/crontab/checkIllegal2

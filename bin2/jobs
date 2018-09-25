@@ -1,0 +1,192 @@
+#!/usr/bin/env python
+
+# This program stores the information about the running processes on an AIX
+# compute node in a file.
+
+from subprocess import Popen, PIPE
+from fnmatch import fnmatch
+import sys
+import os
+import time
+from hostlist import expand_hostlist
+import ConfigParser
+
+# Global variables (do not edit)
+rootDir         = ''
+PBS             = ''   # 0 = SLURM, 1 = PBS
+nodesSeenBefore = dict()
+simpleNodeList  = []
+nodeInfo        = dict()
+
+
+# ******************************************************************************
+
+def init():
+  global rootDir, PBS
+
+  # Get the root directory, where this script is located
+  relPath = os.path.dirname(sys.argv[0])
+  absPath = os.path.abspath(relPath)
+
+  # Remove the ending '/'
+  if absPath.endswith('/'):
+    absPath = absPath.rstrip('/')
+
+  # Remove the bin directory
+  if absPath.endswith('bin2'):
+    absPath = os.path.dirname(absPath)
+
+  # Make certain that the path ends with a '/'
+  if not absPath.endswith('/'):
+    absPath += '/'
+
+  rootDir = absPath
+
+  # Read info from config file
+  config = ConfigParser.ConfigParser()
+  config.read(rootDir+'etc/config')
+
+  if config.has_option("Jobs", "pbs"):
+    PBS = config.get('Jobs', 'pbs').strip()
+  else:
+    if config.get('Jobs', 'slurm').strip() == "1":
+      PBS = "0"
+    else:
+      PBS = "1"
+
+
+# ******************************************************************************
+
+# Stores information about a job
+def updateLists(jobid, userid, nodes, account):
+  # do not store jobs that are not running
+  if len(nodes) == 1 and nodes[0][0] == '-':
+    return
+
+  jobinfo = [jobid, userid, len(nodes), account]
+
+  for node in nodes:
+    if node in nodesSeenBefore:
+      # add information about this job to the information about the node
+      nodeInfo[node].append(jobinfo)
+    else:
+      # make a list of the nodes that are in use, so that it can be sorted
+      nodesSeenBefore[node] = 1
+      simpleNodeList.append(node)
+
+      # make a new list about job info and store this in the node information
+      nodeInfo[node] = [jobinfo]
+
+# ******************************************************************************
+
+# Finds (job, user, node) for all running jobs
+def getJobInfo_PBS():
+  # Get the list of runnning jobs for this user
+  p1 = Popen(['qstat', '-wtn1'], stdout=PIPE)
+  jobs = p1.communicate()[0].strip().split('\n');
+
+  # Check each job that this user has running right now, while skipping the 
+  # 4 line header
+  readingJob = 0
+  for i in range(4, len(jobs)):
+    line = jobs[i]
+
+    info   = line.split()
+    jobid  = info[0].split('.')[0]
+    userid = info[1]
+    status = info[9]
+
+    # Find the value of Account_Name
+    p1 = Popen(['qstat', '-f', jobid], stdout=PIPE)
+    lines = p1.communicate()[0].strip().split('\n');
+
+    account = ''
+    for line in lines:
+      if "Account_Name" in line:
+        account = line.split('=')[1].strip()
+
+
+    # update the lists with the information about the job
+    if status == 'R':
+      nodes = [] 
+      parts = info[11].lstrip().split('+')
+      for p in parts:
+        if p != "":
+          nodes.append(p.split('/')[0])
+
+      updateLists(jobid, userid, nodes, account)
+
+# Finds (job, user, node) for all running jobs
+def getJobInfo_SLURM():
+  # Get the list of runnning jobs for this user
+  p1 = Popen(['squeue', '-ho', '%i:%u:%t:%N:%a'], stdout=PIPE)
+  jobs = p1.communicate()[0].strip().split('\n');
+
+  # Check each job that this user has running right now
+  for i in range(0, len(jobs)):
+    line = jobs[i]
+
+    # read information about the job
+    info    = line.split(':')
+    jobid   = info[0]
+    userid  = info[1]
+    status  = info[2]
+    account = info[4]
+
+    if status == 'R':
+      # convert e.g. 'c3-[1-2,9]' to 'c3-1,c3-2,c3-9'
+      nodes = expand_hostlist(info[3])
+
+      # convert e.g. 'c9-19' to 'compute-9-19'
+#      for j in range(0, len(nodes)):
+#        nodes[j] = "compute-"+nodes[j][1:]
+
+      # update the lists with the information about this job
+      updateLists(jobid, userid, nodes, account)
+
+# Finds (job, user, node) for all running jobs
+def getJobInfo():
+  if PBS == '1':
+    getJobInfo_PBS()
+  else:
+    getJobInfo_SLURM()
+
+# ******************************************************************************
+
+# Store a line for each node in a file
+def storeNodeInfo(fileName):
+  # Rewrite all information to the log file
+  file = open(fileName, "w")
+
+  # sort the simple node list
+  simpleNodeList.sort()
+
+  for node in simpleNodeList:
+    line = node+":"
+    firstJob = 1
+    for jobid, userid, nodeCount, account in nodeInfo[node]:
+      if not firstJob:
+        line += ";"
+      line += jobid+","+userid+","+str(nodeCount)+","+account
+      firstJob = 0
+    file.write(line+"\n")
+
+  file.close()
+
+# ******************************************************************************
+
+
+# Main
+
+# Read global variables
+init()
+
+# Use "qstat -tn" to get a list of the running jobs and the corresponding nodes
+getJobInfo()
+
+# store the information about the jobs on each node
+storeNodeInfo(rootDir+"log/joblist")
+
+# sleep some time, so that all nodes get updated about the new joblist
+# before the next script uses it.
+time.sleep( 5 )
